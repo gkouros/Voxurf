@@ -19,7 +19,7 @@ data = dict(
 
 surf_train=dict(
     load_density_from=None,
-    load_sdf_from='auto', # './logs/dtu/scan40_smooth_sdf/surf_001000.tar',  
+    load_sdf_from='auto', # './logs/dtu/scan40_smooth_sdf/surf_001000.tar',
 
     pg_scale=[15000],
     scale_ratio=4.096,
@@ -84,4 +84,6 @@ surf_model_and_render=dict(
     stepsize=0.5, # whole ray
     s_ratio=50,
     s_start=0.05,
+    use_reflections=True,
+    use_n_dot_v=True,
 )
