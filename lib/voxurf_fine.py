@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from lib.dvgo_ori import extract_geometry
 from torch_scatter import segment_coo
-
+from lib import ref_utils
 from . import grid
 from torch.utils.cpp_extension import load
 parent_dir = os.path.dirname(os.path.abspath(__file__))
@@ -34,18 +34,19 @@ class Voxurf(torch.nn.Module):
                  fast_color_thres=0,
                  rgbnet_dim=0, rgbnet_direct=False, rgbnet_full_implicit=False,
                  rgbnet_depth=3, rgbnet_width=128,
-                 posbase_pe=5, viewbase_pe=4, 
+                 posbase_pe=5, viewbase_pe=4,
                  center_sdf=False, grad_feat=(1.0,), sdf_feat=(),
                  use_layer_norm=False,
                  grad_mode='interpolate',
                  s_ratio=2000, s_start=0.2, s_learn=False, step_start=0,
-                 smooth_sdf=False, 
+                 smooth_sdf=False,
                  smooth_ksize=0, smooth_sigma=1,
                  k_rgbnet_depth=3, k_res=False, k_posbase_pe=5, k_viewbase_pe=4,
                  k_center_sdf=False, k_grad_feat=(1.0,), k_sdf_feat=(),
                  smooth_scale=True, use_grad_norm=True,
                  use_rgb_k=True, k_detach_1=True, k_detach_2=True,
                  use_rgbnet_k0=False,
+                use_reflections=False, use_n_dot_v=False,
                  **kwargs):
         super(Voxurf, self).__init__()
         self.register_buffer('xyz_min', torch.Tensor(xyz_min))
@@ -122,6 +123,8 @@ class Voxurf(torch.nn.Module):
             self.k_detach_2 = k_detach_2
             self.use_rgbnet_k0 = use_rgbnet_k0
             self.use_layer_norm = use_layer_norm
+            self.use_reflections = use_reflections
+            self.use_n_dot_v = use_n_dot_v
             dim0 += len(self.grad_feat) * 3
             dim0 += len(self.sdf_feat) * 6
             if self.use_rgbnet_k0:
@@ -161,6 +164,8 @@ class Voxurf(torch.nn.Module):
             if self.k_res:
                 k_dim0 += 3
             if self.k_center_sdf:
+                k_dim0 += 1
+            if self.use_n_dot_v:
                 k_dim0 += 1
             k_dim0 += len(self.k_grad_feat) * 3
             k_dim0 += len(self.k_sdf_feat) * 6
@@ -240,7 +245,7 @@ class Voxurf(torch.nn.Module):
         self.tv_smooth_conv.bias.data = torch.zeros(1)
         for param in self.tv_smooth_conv.parameters():
             param.requires_grad = False
-            
+
         self.mask_kernel =  weight.view(1, -1).float().cuda()
 
     def _gaussian_3dconv(self, ksize=3, sigma=1):
@@ -498,7 +503,7 @@ class Voxurf(torch.nn.Module):
         c = prev_cdf
         alpha = ((p + 1e-5) / (c + 1e-5)).clip(0.0, 1.0).squeeze()
         return s_val, alpha
-    
+
     def grid_sampler(self, xyz, *grids, mode=None, align_corners=True, sample_ret=True, sample_grad=False, displace=0.1, smooth=False):
         '''Wrapper for the interp operation'''
         if mode is None:
@@ -506,11 +511,11 @@ class Voxurf(torch.nn.Module):
             mode = 'nearest' if self.nearest else 'bilinear'
         shape = xyz.shape[:-1]
         xyz = xyz.reshape(1,1,1,-1,3)
-        
-        if smooth:	
+
+        if smooth:
             grid = self.smooth_conv(grids[0])
             grids[0] = grid
-            
+
         outs = []
         if sample_ret:
             ind_norm = ((xyz - self.xyz_min) / (self.xyz_max - self.xyz_min)).flip((-1,)) * 2 - 1
@@ -518,27 +523,27 @@ class Voxurf(torch.nn.Module):
             ret = F.grid_sample(grid, ind_norm, mode=mode, align_corners=align_corners).reshape(
                 grid.shape[1],-1).T.reshape(*shape,grid.shape[1]).squeeze(-1)
             outs.append(ret)
-        
+
         if sample_grad:
             grid = grids[0]
             feat, grad = self.sample_sdfs(xyz, grid, displace_list=[1.0], use_grad_norm=False)
             feat = torch.cat([feat[:, 4:6], feat[:, 2:4], feat[:, 0:2]], dim=-1)
             grad = torch.cat([grad[:, [2]], grad[:, [1]], grad[:, [0]]], dim=-1)
-            
+
             outs.append(grad)
             outs.append(feat)
-            
+
         if len(outs) == 1:
             return outs[0]
         else:
             return outs
-    
-    
+
+
     def sample_sdfs(self, xyz, *grids, displace_list, mode='bilinear', align_corners=True, use_grad_norm=False):
-        
+
         shape = xyz.shape[:-1]
         xyz = xyz.reshape(1,1,1,-1,3)
-        
+
         grid = grids[0]
         # ind from xyz to zyx !!!!!
         ind_norm = ((xyz - self.xyz_min) / (self.xyz_max - self.xyz_min)).flip((-1,)) * 2 - 1
@@ -548,32 +553,32 @@ class Voxurf(torch.nn.Module):
         offset = torch.tensor([[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]]).cuda()
         displace = torch.tensor(displace_list).cuda()
         offset = offset[:, None, :] * displace[None, :, None]
-        
+
         all_ind = ind.unsqueeze(-2) + offset.view(-1, 3)
         all_ind = all_ind.view(1, 1, 1, -1, 3)
         all_ind[..., 0] = all_ind[..., 0].clamp(min=0, max=size_factor_zyx[0] - 1)
         all_ind[..., 1] = all_ind[..., 1].clamp(min=0, max=size_factor_zyx[1] - 1)
         all_ind[..., 2] = all_ind[..., 2].clamp(min=0, max=size_factor_zyx[2] - 1)
-        
+
         all_ind_norm = (all_ind / (size_factor_zyx-1)) * 2 - 1
         feat = F.grid_sample(grid, all_ind_norm, mode=mode, align_corners=align_corners)
-        
+
         all_ind = all_ind.view(1, 1, 1, -1, 6, len(displace_list), 3)
         diff = all_ind[:, :, :, :, 1::2, :, :] - all_ind[:, :, :, :, 0::2, :, :]
         diff, _ = diff.max(dim=-1)
         feat_ = feat.view(1, 1, 1, -1, 6, len(displace_list))
         feat_diff = feat_[:, :, :, :, 1::2, :] - feat_[:, :, :, :, 0::2, :]
         grad = feat_diff / diff / self.voxel_size
-        
+
         feat = feat.view(shape[-1], 6, len(displace_list))
         grad = grad.view(shape[-1], 3, len(displace_list))
-        
+
         if use_grad_norm:
             grad = grad / (grad.norm(dim=1, keepdim=True) + 1e-5)
-        
+
         feat = feat.view(shape[-1], 6 * len(displace_list))
         grad = grad.view(shape[-1], 3 * len(displace_list))
-        
+
         return feat, grad
 
     def hit_coarse_geo(self, rays_o, rays_d, near, far, stepsize, **render_kwargs):
@@ -679,20 +684,21 @@ class Voxurf(torch.nn.Module):
 
         all_grad_inds = list(set(self.grad_feat + self.k_grad_feat))
         all_sdf_inds = list(set(self.sdf_feat + self.k_sdf_feat))
-        
+
         assert all_grad_inds == all_sdf_inds
-        
-        if len(all_grad_inds) > 0: 
+
+        if len(all_grad_inds) > 0:
             all_grad_inds = sorted(all_grad_inds)
             all_grad_inds_ = deepcopy(all_grad_inds)
             all_feat, all_grad = self.sample_sdfs(ray_pts, sdf_grid, displace_list=all_grad_inds_, use_grad_norm=self.use_grad_norm)
         else:
             all_feat, all_grad = None, None
-        
+
         self.gradient = self.neus_sdf_gradient()
-        
+
         viewdirs_emb = (viewdirs.unsqueeze(-1) * self.viewfreq).flatten(-2)
         viewdirs_emb = torch.cat([viewdirs, viewdirs_emb.sin(), viewdirs_emb.cos()], -1)
+
         rays_xyz = (ray_pts - self.xyz_min) / (self.xyz_max - self.xyz_min)
         xyz_emb = (rays_xyz.unsqueeze(-1) * self.posfreq).flatten(-2)
         xyz_emb = torch.cat([rays_xyz, xyz_emb.sin(), xyz_emb.cos()], -1)
@@ -722,11 +728,24 @@ class Voxurf(torch.nn.Module):
         if self.use_rgb_k:
             k_xyz_emb = (rays_xyz.unsqueeze(-1) * self.k_posfreq).flatten(-2)
             k_xyz_emb = torch.cat([rays_xyz, k_xyz_emb.sin(), k_xyz_emb.cos()], -1)
-            k_viewdirs_emb = (viewdirs.unsqueeze(-1) * self.k_viewfreq).flatten(-2)
-            k_viewdirs_emb = torch.cat([viewdirs, k_viewdirs_emb.sin(), k_viewdirs_emb.cos()], -1)
-            k_rgb_feat = torch.cat([
-                k0, k_xyz_emb, k_viewdirs_emb.flatten(0, -2)[ray_id]
-            ], -1)
+
+            normals = -ref_utils.l2_normalize(gradient)
+            k_rgb_feat = [k0, k_xyz_emb]
+            if self.use_reflections:
+                k_refdirs = ref_utils.reflect(-viewdirs[ray_id], normals)
+                k_refdirs_emb = (k_refdirs.unsqueeze(-1) * self.k_viewfreq).flatten(-2)
+                k_refdirs_emb = torch.cat([k_refdirs, k_refdirs_emb.sin(), k_refdirs_emb.cos()], -1)
+                k_rgb_feat.append(k_refdirs_emb.flatten(0, -2))
+            else:
+                k_viewdirs_emb = (viewdirs.unsqueeze(-1) * self.k_viewfreq).flatten(-2)
+                k_viewdirs_emb = torch.cat([viewdirs, k_viewdirs_emb.sin(), k_viewdirs_emb.cos()], -1)
+                k_rgb_feat.append(k_viewdirs_emb.flatten(0, -2)[ray_id])
+
+            if self.use_n_dot_v:
+                k_dotprod = torch.sum(normals * viewdirs[ray_id], dim=-1, keepdims=True)
+                k_rgb_feat.append(k_dotprod)
+
+            k_rgb_feat = torch.cat(k_rgb_feat, dim=-1)
 
             assert len(self.k_grad_feat) == 1 and self.k_grad_feat[0] == 1.0
             assert len(self.k_sdf_feat) == 0
@@ -756,7 +775,7 @@ class Voxurf(torch.nn.Module):
             k_rgb_marched = k_rgb_marched.clamp(0, 1)
         else:
             k_rgb_marched = None
-            
+
         # Ray marching
         rgb_marched = segment_coo(
             src=(weights.unsqueeze(-1) * rgb),
