@@ -12,3 +12,4 @@ logs
 .idea
 assets
 Voxurf.code-workspace
+batch_jobs.sh
