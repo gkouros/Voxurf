@@ -817,7 +817,7 @@ class Voxurf(torch.nn.Module):
                     if eps is None:
                         eps = torch.tensor(torch.finfo(torch.float32).eps)
                     srgb0 = 323 / 25 * linear
-                    srgb1 = (211 * xnp.maximum(eps, linear)**(5 / 12) - 11) / 200
+                    srgb1 = (211 * torch.maximum(eps, linear)**(5 / 12) - 11) / 200
                     return torch.where(linear <= 0.0031308, srgb0, srgb1)
 
                 k_rgb = torch.clip(linear_to_srgb(specular_linear + diffuse_linear), 0.0, 1.0)
