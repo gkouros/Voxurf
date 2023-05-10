@@ -806,21 +806,21 @@ class Voxurf(torch.nn.Module):
                 diffuse_linear = torch.sigmoid(raw_rgb_diffuse - torch.log(
                     torch.tensor(3.0, dtype=torch.float32)))
 
-            if self.use_specular_tint:
-                specular_linear = tint * k_rgb
-            else:
-                specular_linear = 0.5 * k_rgb
+                if self.use_specular_tint:
+                    specular_linear = tint * k_rgb
+                else:
+                    specular_linear = 0.5 * k_rgb
 
-            # Combine specular and diffuse components and tone map to sRGB.
-            def linear_to_srgb(linear, eps):
-                """Assumes `linear` is in [0, 1], see https://en.wikipedia.org/wiki/SRGB."""
-                if eps is None:
-                    eps = torch.tensor(torch.finfo(torch.float32).eps)
-                srgb0 = 323 / 25 * linear
-                srgb1 = (211 * xnp.maximum(eps, linear)**(5 / 12) - 11) / 200
-                return torch.where(linear <= 0.0031308, srgb0, srgb1)
+                # Combine specular and diffuse components and tone map to sRGB.
+                def linear_to_srgb(linear, eps=None):
+                    """Assumes `linear` is in [0, 1], see https://en.wikipedia.org/wiki/SRGB."""
+                    if eps is None:
+                        eps = torch.tensor(torch.finfo(torch.float32).eps)
+                    srgb0 = 323 / 25 * linear
+                    srgb1 = (211 * xnp.maximum(eps, linear)**(5 / 12) - 11) / 200
+                    return torch.where(linear <= 0.0031308, srgb0, srgb1)
 
-            rgb = torch.clip(linear_to_srgb(specular_linear + diffuse_linear), 0.0, 1.0)
+                k_rgb = torch.clip(linear_to_srgb(specular_linear + diffuse_linear), 0.0, 1.0)
 
             k_rgb_marched = segment_coo(
                 src=(weights.unsqueeze(-1) * k_rgb),
