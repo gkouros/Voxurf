@@ -46,7 +46,8 @@ class Voxurf(torch.nn.Module):
                  smooth_scale=True, use_grad_norm=True,
                  use_rgb_k=True, k_detach_1=True, k_detach_2=True,
                  use_rgbnet_k0=False,
-                use_reflections=False, use_n_dot_v=False,
+                 use_reflections=False, use_n_dot_v=False,
+                 use_diffuse_color=False, use_specular_tint=False,
                  **kwargs):
         super(Voxurf, self).__init__()
         self.register_buffer('xyz_min', torch.Tensor(xyz_min))
@@ -91,6 +92,15 @@ class Voxurf(torch.nn.Module):
         else:
             raise NotImplementedError
 
+        if use_diffuse_color:
+            self.diffuse = grid.create_grid(
+                'DenseGrid', channels=3, world_size=self.world_size,
+                xyz_min=self.xyz_min, xyz_max=self.xyz_max)
+        if use_specular_tint:
+            self.tint = grid.create_grid(
+                'DenseGrid', channels=3, world_size=self.world_size,
+                xyz_min=self.xyz_min, xyz_max=self.xyz_max)
+
         self.init_smooth_conv(smooth_ksize, smooth_sigma)
 
         # init color representation
@@ -125,6 +135,8 @@ class Voxurf(torch.nn.Module):
             self.use_layer_norm = use_layer_norm
             self.use_reflections = use_reflections
             self.use_n_dot_v = use_n_dot_v
+            self.use_diffuse_color = use_diffuse_color
+            self.use_specular_tint = use_specular_tint
             dim0 += len(self.grad_feat) * 3
             dim0 += len(self.sdf_feat) * 6
             if self.use_rgbnet_k0:
@@ -644,6 +656,11 @@ class Voxurf(torch.nn.Module):
 
         sdf, gradient, feat = self.grid_sampler(ray_pts, sdf_grid, sample_ret=True, sample_grad=True, displace=1.0)
 
+        if self.use_specular_tint:
+            tint = torch.sigmoid(self.tint(ray_pts))
+        if self.use_diffuse_color:
+            raw_rgb_diffuse = self.diffuse(ray_pts)
+
         dist = render_kwargs['stepsize'] * self.voxel_size
         s_val, alpha = self.neus_alpha_from_sdf_scatter(viewdirs, ray_id, dist, sdf, gradient, global_step=global_step,
                                                  is_train=global_step is not None, use_mid=True)
@@ -657,6 +674,10 @@ class Voxurf(torch.nn.Module):
             step_id = step_id[mask]
             gradient = gradient[mask] # merge to sample once
             sdf = sdf[mask]
+            if self.use_diffuse_color:
+                raw_rgb_diffuse = raw_rgb_diffuse[mask]
+            if self.use_specular_tint:
+                tint = tint[mask]
 
         # compute accumulated transmittance
         if ray_id.ndim == 2:
@@ -668,6 +689,11 @@ class Voxurf(torch.nn.Module):
             step_id = step_id.squeeze()
             gradient = gradient.squeeze()
             sdf = sdf.squeeze()
+            if self.use_diffuse_color:
+                raw_rgb_diffuse = raw_rgb_diffuse.squeeze()
+            if self.use_specular_tint:
+                tint = tint.squeeze()
+
 
         weights, alphainv_last = Alphas2Weights.apply(alpha, ray_id, N)
         if self.fast_color_thres > 0:
@@ -679,6 +705,10 @@ class Voxurf(torch.nn.Module):
             step_id = step_id[mask]
             gradient = gradient[mask]
             sdf = sdf[mask]
+            if self.use_diffuse_color:
+                raw_rgb_diffuse = raw_rgb_diffuse[mask]
+            if self.use_specular_tint:
+                tint = tint[mask]
 
         k0 = self.k0(ray_pts)
 
@@ -724,7 +754,6 @@ class Voxurf(torch.nn.Module):
         rgb_logit = self.rgbnet(rgb_feat)
         rgb = torch.sigmoid(rgb_logit)
 
-
         if self.use_rgb_k:
             k_xyz_emb = (rays_xyz.unsqueeze(-1) * self.k_posfreq).flatten(-2)
             k_xyz_emb = torch.cat([rays_xyz, k_xyz_emb.sin(), k_xyz_emb.cos()], -1)
@@ -769,6 +798,30 @@ class Voxurf(torch.nn.Module):
             else:
                 k_rgb_logit = rgb_logit + self.k_rgbnet(k_rgb_feat)
             k_rgb = torch.sigmoid(k_rgb_logit)
+
+
+            # Initialize linear diffuse color around 0.25, so that the
+            # combined linear color is initialized around 0.5.
+            if self.use_diffuse_color:
+                diffuse_linear = torch.sigmoid(raw_rgb_diffuse - torch.log(
+                    torch.tensor(3.0, dtype=torch.float32)))
+
+            if self.use_specular_tint:
+                specular_linear = tint * k_rgb
+            else:
+                specular_linear = 0.5 * k_rgb
+
+            # Combine specular and diffuse components and tone map to sRGB.
+            def linear_to_srgb(linear, eps):
+                """Assumes `linear` is in [0, 1], see https://en.wikipedia.org/wiki/SRGB."""
+                if eps is None:
+                    eps = torch.tensor(torch.finfo(torch.float32).eps)
+                srgb0 = 323 / 25 * linear
+                srgb1 = (211 * xnp.maximum(eps, linear)**(5 / 12) - 11) / 200
+                return torch.where(linear <= 0.0031308, srgb0, srgb1)
+
+            rgb = torch.clip(linear_to_srgb(specular_linear + diffuse_linear), 0.0, 1.0)
+
             k_rgb_marched = segment_coo(
                 src=(weights.unsqueeze(-1) * k_rgb),
                 index=ray_id, out=torch.zeros([N, 3]), reduce='sum') + alphainv_last[..., None] * render_kwargs['bg']

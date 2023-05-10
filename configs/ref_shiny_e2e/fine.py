@@ -86,4 +86,6 @@ surf_model_and_render=dict(
     s_start=0.05,
     use_reflections=True,
     use_n_dot_v=True,
+    use_diffuse_color=False,
+    use_specular_tint=False,
 )
