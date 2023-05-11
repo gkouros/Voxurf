@@ -84,8 +84,8 @@ surf_model_and_render=dict(
     stepsize=0.5, # whole ray
     s_ratio=50,
     s_start=0.05,
-    use_reflections=True,
-    use_n_dot_v=True,
+    use_reflections=False,
+    use_n_dot_v=False,
     use_diffuse_color=False,
     use_specular_tint=False,
 )
