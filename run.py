@@ -73,7 +73,20 @@ def config_parser():
     parser.add_argument("--run_dvgo_init", action='store_true')
     parser.add_argument("--interpolate", default='')
     parser.add_argument("--extract_color", action='store_true')
+    parser.add_argument('--overwrite', type=str, help='Overwrite params in file')
     return parser
+
+
+def overwrite_configs_with_args(cfg, args):
+    overwrite = args.overwrite.split()
+    overwrite = dict([arg.split('=') for arg in overwrite])
+    def getFromDict(dataDict, mapList):
+        return reduce(operator.getitem, mapList, dataDict)
+    def setInDict(dataDict, mapList, value):
+        getFromDict(dataDict, mapList[:-1])[mapList[-1]] = value
+    for key in overwrite:
+        subkeys = key.split('.')
+        setInDict(cfg, subkeys, eval(overwrite[key]))
 
 
 @torch.no_grad()
@@ -635,7 +648,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         if getattr(cfg_train, 'weight_rgb0', 0.) > 0:
             loss += F.mse_loss(render_result['rgb_marched0'], target) * cfg_train.weight_rgb0
 
-        
+
         loss.backward()
         # make sure that density has no grad
         if global_step>cfg_train.tv_from and global_step<cfg_train.tv_end and global_step%cfg_train.tv_every==0:
@@ -649,7 +662,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
                     bg_density_tv = getattr(tv_terms, 'bg_density_tv', 0)
                     if bg_density_tv > 0:
                         model.bg_density_total_variation_add_grad(
-                            cfg_train.weight_tv_density * bg_density_tv / len(rays_o), global_step < cfg_train.tv_dense_before)                                                                                   
+                            cfg_train.weight_tv_density * bg_density_tv / len(rays_o), global_step < cfg_train.tv_dense_before)
                 if cfg_train.weight_tv_k0 > 0:
                     model.k0_total_variation_add_grad(
                         cfg_train.weight_tv_k0 / len(rays_o), global_step < cfg_train.tv_dense_before)
@@ -697,7 +710,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
                     return min(extra_lr, 1.0)
                 else:
                     return 1.0
-            warm_up_iters = cfg_train.cosine_lr_cfg.get('warm_up_iters', 0) 
+            warm_up_iters = cfg_train.cosine_lr_cfg.get('warm_up_iters', 0)
             warm_up_min_ratio = cfg_train.cosine_lr_cfg.get('warm_up_min_ratio', 1.0)
             const_warm_up = cfg_train.cosine_lr_cfg.get('const_warm_up', False)
             cos_min_ratio = cfg_train.cosine_lr_cfg.get('cos_min_ratio', False)
@@ -913,6 +926,8 @@ if __name__=='__main__':
     parser = config_parser()
     args = parser.parse_args()
     cfg = mmcv.Config.fromfile(args.config)
+    overwrite_configs_with_args(cfg, args)
+
     # reset the root by the scene id
     if args.scene:
         cfg.expname += "{}".format(args.scene)
