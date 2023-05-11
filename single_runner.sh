@@ -3,7 +3,7 @@
 CONFIG=$1
 WORKDIR=$2
 SCENE=$3
-ARGS=${@:3} # all subsequent args are assumed args for the python script
+ARGS=${@:4} # all subsequent args are assumed args for the python script
 echo "ARGS: $ARGS"
 
 
@@ -17,8 +17,8 @@ export LD_LIBRARY_PATH="/usr/local/cuda-12/lib64:/usr/local/cuda/lib64:$CONDA_PR
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES/CUDA/}
 
 # coarse training stage
-# echo python run.py --config ${CONFIG}/coarse.py -p ${WORKDIR} --no_reload --run_dvgo_init --sdf_mode voxurf_coarse --scene ${SCENE} --overwrite="$ARGS"
-# python run.py --config ${CONFIG}/coarse.py -p ${WORKDIR} --no_reload --run_dvgo_init --sdf_mode voxurf_coarse --scene ${SCENE} --overwrite="$ARGS"
+echo python run.py --config ${CONFIG}/coarse.py -p ${WORKDIR} --no_reload --run_dvgo_init --sdf_mode voxurf_coarse --scene ${SCENE} --overwrite="$ARGS"
+python run.py --config ${CONFIG}/coarse.py -p ${WORKDIR} --no_reload --run_dvgo_init --sdf_mode voxurf_coarse --scene ${SCENE} --overwrite="$ARGS"
 
 # fine training stage
 echo python run.py --config ${CONFIG}/fine.py --render_test -p ${WORKDIR} --no_reload --sdf_mode voxurf_fine --scene ${SCENE} --overwrite="$ARGS"
