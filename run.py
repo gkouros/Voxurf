@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datetime import datetime
+from functools import reduce
 
 from lib import utils, dtu_eval
 # from torch.utils.tensorboard import SummaryWriter
