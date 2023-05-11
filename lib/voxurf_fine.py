@@ -754,14 +754,18 @@ class Voxurf(torch.nn.Module):
         rgb_logit = self.rgbnet(rgb_feat)
         rgb = torch.sigmoid(rgb_logit)
 
+        if gradient is not None and (render_kwargs.get('render_grad', False) or
+                                     self.use_reflections):
+            normal = gradient / (gradient.norm(2, -1, keepdim=True) + 1e-6)
+
         if self.use_rgb_k:
+            # normal = -ref_utils.l2_normalize(gradient)
             k_xyz_emb = (rays_xyz.unsqueeze(-1) * self.k_posfreq).flatten(-2)
             k_xyz_emb = torch.cat([rays_xyz, k_xyz_emb.sin(), k_xyz_emb.cos()], -1)
 
-            normals = -ref_utils.l2_normalize(gradient)
             k_rgb_feat = [k0, k_xyz_emb]
             if self.use_reflections:
-                k_refdirs = ref_utils.reflect(-viewdirs[ray_id], normals)
+                k_refdirs = ref_utils.reflect(-viewdirs[ray_id], normal)
                 k_refdirs_emb = (k_refdirs.unsqueeze(-1) * self.k_viewfreq).flatten(-2)
                 k_refdirs_emb = torch.cat([k_refdirs, k_refdirs_emb.sin(), k_refdirs_emb.cos()], -1)
                 k_rgb_feat.append(k_refdirs_emb.flatten(0, -2))
@@ -771,7 +775,7 @@ class Voxurf(torch.nn.Module):
                 k_rgb_feat.append(k_viewdirs_emb.flatten(0, -2)[ray_id])
 
             if self.use_n_dot_v:
-                k_dotprod = torch.sum(normals * viewdirs[ray_id], dim=-1, keepdims=True)
+                k_dotprod = torch.sum(normal * viewdirs[ray_id], dim=-1, keepdims=True)
                 k_rgb_feat.append(k_dotprod)
 
             k_rgb_feat = torch.cat(k_rgb_feat, dim=-1)
@@ -803,6 +807,7 @@ class Voxurf(torch.nn.Module):
             # Initialize linear diffuse color around 0.25, so that the
             # combined linear color is initialized around 0.5.
             if self.use_diffuse_color:
+                # diffuse_linear = torch.sigmoid(raw_rgb_diffuse)
                 diffuse_linear = torch.sigmoid(raw_rgb_diffuse - torch.log(
                     torch.tensor(3.0, dtype=torch.float32)))
 
@@ -820,7 +825,10 @@ class Voxurf(torch.nn.Module):
                     srgb1 = (211 * torch.maximum(eps, linear)**(5 / 12) - 11) / 200
                     return torch.where(linear <= 0.0031308, srgb0, srgb1)
 
-                k_rgb = torch.clip(linear_to_srgb(specular_linear + diffuse_linear), 0.0, 1.0)
+                # k_rgb = torch.clip(linear_to_srgb(specular_linear + diffuse_linear), 0.0, 1.0)
+                # k_rgb = torch.sigmoid(diffuse_linear + specular_linear)
+                k_rgb = torch.clip(diffuse_linear + specular_linear, 0.0, 1.0)
+                # k_rgb = diffuse_linear + specular_linear
 
             k_rgb_marched = segment_coo(
                 src=(weights.unsqueeze(-1) * k_rgb),
